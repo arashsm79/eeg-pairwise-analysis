@@ -4,6 +4,9 @@ __pycache__/
 *$py.class
 *octave-workspace*
 
+*.ttt
+*.fff
+
 # C extensions
 *.so
 

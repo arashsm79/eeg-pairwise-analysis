@@ -1,0 +1,238 @@
+---
+title: "pairwise interactions on Sicalri's Neural Correlates of Dreaming"
+shorttitle: "pySPI Sicalri"
+author:
+  - name: Arash Sal Moslehian
+    corresponding: true
+    email: arash.salmoslehian@epfl.ch
+    affiliations:
+      - name: EPFL
+        department: Neuro-X
+        city: Lausanne
+        country: Switzerland
+abstract: |
+ Here I run pyPSI on two electrodes from Siclari's neural correlates of dreaming paper to see which SPIs perform well for classifying DE vs. NE.
+keywords: [information-theory, dreaming, consciousness]
+author-note:
+  disclosures:
+    conflict of interest: The author has no conflict of interest to declare.
+execute:
+  echo: false
+  output: false
+  eval: false
+bibliography: references.bib
+format:
+  apaquarto-pdf:
+    keep-tex: true
+    fig-pos: 'H'
+  apaquarto-html: default
+  pdf:
+    keep-tex: true
+  apaquarto-docx: default
+  apaquarto-typst: default
+---
+
+```{r loading-libraries}
+#| eval: true
+setwd('/home/arashsm79/playground/eeg-analysis/report/siclari-neural-correlates')
+library(ggplot2)
+library(olsrr)
+library(MASS)
+library(knitr)
+library(car)
+library(tidyverse)
+library(broom)
+library(xtable)
+library(dplyr)
+library(lmtest)
+library(kableExtra)
+library(caret)
+library(purrr)
+```
+
+```{r preprocessing}
+#| eval: true
+df = read.csv('siclari-spi.csv')
+
+columns_to_drop = c("Filename", "Case.ID","Treatment.group", "Duration", "EEG.sample.rate", "Number.of.EEG.channels", "Last.sleep.stage", "Has.EOG", "Has.EMG", "Has.ECG", "Proportion.artifacts", "Time.of.awakening", "Subject.age", "Subject.sex", "Subject.healthy", "Has.more.data", "Remarks")
+df = df %>% select(-all_of(columns_to_drop))
+
+columns_with_nan <- colnames(df)[sapply(df, function(col) any(is.na(col)))]
+message("Number of NaN SPIs: ", length(columns_with_nan))
+df = df %>% select(-all_of(columns_with_nan))
+
+constant_columns = df %>% select(where(~ n_distinct(.) == 1)) %>% colnames()
+message("Number of constant SPIs: ", length(constant_columns))
+df = df %>% select(-all_of(constant_columns))
+
+final_features = colnames(df)[3:ncol(df)]
+df = df %>% filter(Experience %in% c(2, 0))
+
+df$Experience = as.factor(df$Experience)
+
+# final_features = final_features[1:5]
+
+```
+
+```{r function-definitions}
+#| eval: true
+family_wise_alpha <- 0.05
+pvalue <- function(value){
+  if(is.na(value)) {
+    "-"
+  } else if(value < 0.001) {
+    paste0("<.001")
+  } else {
+    str_remove(value, pattern = "0(?=.\\d)")
+  }
+}
+```
+
+
+# Summary
+
+- I first ran all the SPIs for one subject which took an extremely long time to compute. I then removed those SPIs that are computationally expensive (see this [commit](https://github.com/arashsm79/eeg-pairwise-analysis/commit/5046f4e75f1b09937b2b5c9ab8b28e35a6c43362)) and the computation time came down to around a minute for each recording. The removed SPIs were from Information Theory and Spectral connectivity categories. In the end 187 SPIs were left, out of which only 124 had memory requirements that my computer could satisfy and the rest resulted in out-of-memory errors and NaNs @tbl-spistats.
+
+- Managed to get the SPIs requiring octave and java to compute as well.
+
+- I plotted the channels using the `HydroCelGSN256v10.sfp` file into a 3D space and chose once Oz (15) and one Pz (137) channel (see `siclari.ipynb`)
+
+- pySPI is using a quite old version of python (3.9 from 2020) along with a bunch of other libraries whose versions are out of date. This can get quite annoying if you would want to combine pySPI with other packages in the same environment. Nevertheless, I have managed to package everything up and make it work in a reproducible manner using [uv](https://docs.astral.sh/uv/).
+
+- Even though some of the SPIs may be undirected, for the sake of simplicity, I only took the upper trianglular entry of the 2x2 matrix to use as a feature for classification.
+
+- The classification is based on the experiment 1 of the original paper @siclariNeuralCorrelatesDreaming2017. I wanted to see which SPIs can predict Dreaming Experience (DE) vs No Experience (NE) better.
+
+
+| Category       | Count |
+|----------------|-------|
+| Successful     |   124 |
+| NaNs           |    55 |
+| Constants      |     8 |
+: SPI stats {#tbl-spistats}
+
+  
+# Results
+
+Similar to the original paper but with less permutation and splits, I do five random 70/30 splits and check for statistical significance using a permutation testing method [see](https://bookdown.org/kmbm92/Applied-Biostats/perm1.html#permute-to-generate-a-null-distribution). This involves fitting 50 null models (by randomly shuffling the labels) and testing them with cross-validation. Then, I compare the observed classification performance for each SPI with the combined null distribution of all SPIs. This gives me p-values, which I adjust for multiple comparisons by controlling the family-wise error rate at 0.05 using the Bonferroni method @siclariNeuralCorrelatesDreaming2017.
+
+The class balance seemed okay between the two condition. Nevertheless the logistic regression model (glm binomial) should help with that as well.
+
+Based on this method, none of the SPIs were significant as see in @fig-stat. The top performing SPIs are presented in table @tbl-topacc.
+
+
+```{r stat}
+#| eval: false
+
+# See https://bookdown.org/kmbm92/Applied-Biostats/perm1.html#permute-to-generate-a-null-distribution for an explanation of permutaiton testing.
+
+set.seed(79) # reproducibility
+
+n_splits <- 5
+n_permutations <- 50
+
+subject_ids <- unique(df$Subject.ID)
+df$Experience <- as.factor(df$Experience)
+
+# stratified sampling by subject ID
+stratified_split <- function(df, subject_ids) {
+  train_subjects <- sample(subject_ids, length(subject_ids) * 0.7)
+  test_subjects <- setdiff(subject_ids, train_subjects)
+  
+  train <- df %>% filter(Subject.ID %in% train_subjects)
+  test <- df %>% filter(Subject.ID %in% test_subjects)
+  list(train = train, test = test)
+}
+
+# calculate p-values and adjusted p-values
+calculate_p_values <- function(observed_perf, null_perf) {
+  p_values <- sapply(observed_perf, function(obs) mean(null_perf >= obs))
+  adj_p_values <- p.adjust(p_values, method = "bonferroni")
+  list(p_values = p_values, adj_p_values = adj_p_values)
+}
+
+# stratified cross-validation and null model evaluation
+results <- list()
+null_distributions <- list()
+
+i = 1
+for (feature in final_features) {
+  observed_accuracies <- c()
+  null_accuracies <- matrix(nrow = n_permutations, ncol = n_splits)
+  start_time <- Sys.time()
+  for (split in 1:n_splits) {
+    splits <- stratified_split(df, subject_ids)
+    train <- splits$train
+    test <- splits$test
+
+    # train model on the observed labels
+    model <- train(as.formula(paste("Experience ~", feature)), data = train, method = "glm", family = "binomial")
+    predictions <- predict(model, test)
+    observed_accuracies <- c(observed_accuracies, mean(predictions == test$Experience))
+
+    # null model evaluations
+    for (perm in 1:n_permutations) {
+      shuffled_train <- train %>% mutate(Experience = sample(Experience))
+      null_model <- train(as.formula(paste("Experience ~", feature)), data = shuffled_train, method = "glm", family = "binomial")
+      null_predictions <- predict(null_model, test)
+      null_accuracies[perm, split] <- mean(null_predictions == test$Experience)
+    }
+  }
+
+  null_distributions[[feature]] <- as.vector(null_accuracies)
+  results[[feature]] <- data.frame(
+    accuracy = mean(observed_accuracies),
+    null_mean = mean(null_distributions[[feature]]),
+    null_sd = sd(null_distributions[[feature]])
+  )
+  print(paste("Testing feature ", i, " out of ", length(final_features), "took: ", Sys.time() - start_time))
+  flush.console()
+  i = i + 1
+}
+
+all_results <- bind_rows(lapply(names(results), function(feature) {
+  res <- results[[feature]]
+  p_val_info <- calculate_p_values(res$accuracy, null_distributions[[feature]])
+  data.frame(
+    SPI = feature,
+    accuracy = res$accuracy,
+    p.value = p_val_info$p_values,
+    p.value.adj = p_val_info$adj_p_values
+  )
+}), .id = "feature")
+
+
+# write.csv(all_results, "siclari-stat-results.csv", row.names = FALSE)
+
+```
+
+```{r plot-stat}
+#| eval: true
+#| output: true
+#| label: fig-stat
+
+all_results <- read.csv("siclari-stat-results.csv")
+
+ggplot(all_results, aes(x = accuracy * 100, fill = p.value.adj < family_wise_alpha)) +
+  geom_histogram(binwidth = 1, alpha = 0.7, position = 'identity') +
+  scale_fill_manual(values = c("TRUE" = "blue", "FALSE" = "gray")) +
+  labs(
+    title = "Accuracy Distribution of SPIs",
+    x = "Accuracy (%)",
+    y = "Num. of SPIs",
+    fill = "Significance"
+  )
+
+```
+
+```{r top}
+#| eval: true
+#| output: asis
+#| label: tbl-topacc
+
+df = all_results
+sorted_df <- df[order(-df$accuracy), ]
+top_10 <- sorted_df[1:10, c("SPI", "accuracy")]
+kable(top_10, col.names = c("SPI", "Accuracy"), caption = "Top 10 Names")
+```
+
