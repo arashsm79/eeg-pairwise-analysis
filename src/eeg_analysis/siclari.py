@@ -29,11 +29,11 @@ def main():
     data_root = Path("/home/arashsm79/playground/eeg-analysis/data/23306054")
     records_path = data_root / "Tononi Serial Awakenings-Part1-No_PSGs/Tononi Serial Awakenings/Records.csv"
     output_path = data_root / 'measures.csv'
+    pyspi_config_path = Path("src/eeg_analysis/siclari-config.yaml")
 
-    channel_names = ['Chan 15', 'Chan 137']
+    canonical_coi_names = ['Chan 15', 'Chan 137']
 
     records = pd.read_csv(records_path)
-    records_with_spi = []
 
     main_calc = None
 
@@ -44,17 +44,22 @@ def main():
         logging.info(f"Subject ID: {row['Subject ID']}, Filename: {row['Filename']}")
         logging.info(f"Processing {eeg_filepath}")
 
+        if row['Subject ID'] == 23:
+            coi_names = [name.replace("Chan ", "") for name in canonical_coi_names] # data for subject 23 has diferent channel names
+        else:
+            coi_names = canonical_coi_names
+
         raw = mne.io.read_raw_edf(eeg_filepath, preload=True, verbose=False)
 
         preprocessed_data = preprocess_signal(raw)
-        coi_data = preprocessed_data.get_data(picks=channel_names)
+        coi_data = preprocessed_data.get_data(picks=coi_names)
 
         if main_calc is None:
-            main_calc = Calculator(configfile='src/eeg_analysis/config.yaml')
+            main_calc = Calculator(configfile=pyspi_config_path)
 
         calc_set = deepcopy(main_calc)
         calc_set.name = f"{row['Subject ID']}_{row['Filename']}"
-        logging.info(f"Calculating SPI between {channel_names} for {eeg_filepath}")
+        logging.info(f"Calculating SPI between {coi_names} for {eeg_filepath}")
         coi_data = np.nan_to_num(coi_data)
         calc_set.load_dataset(coi_data)
         start_time = time.time()
@@ -66,10 +71,12 @@ def main():
             spi = calc_table[feature_name].values[np.triu_indices_from(calc_table[feature_name], k=1)]
             row[feature_name] = spi.item()
 
-        # save it every iteration to avoid losing data in case of crash TODO: append instead of rewrite
-        records_with_spi.append(row)
-        records_with_spi_df = pd.DataFrame(records_with_spi)
-        records_with_spi_df.to_csv(output_path, index=False)
+        # save it every iteration to avoid losing data in case of crash 
+        records_with_spi_df = pd.DataFrame([row])
+        if not output_path.exists():
+            records_with_spi_df.to_csv(output_path, index=False, header=True)
+        else:
+            records_with_spi_df.to_csv(output_path, mode='a', index=False, header=False)
 
 
     exit(0)
